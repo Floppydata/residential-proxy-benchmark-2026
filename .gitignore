@@ -1,0 +1,6 @@
+providers.json
+keys.json
+*.key
+.env
+logs/
+__pycache__/
