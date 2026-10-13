@@ -29,6 +29,11 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
 
+try:
+    from curl_cffi import requests as cffi_requests
+except Exception:  # noqa: BLE001
+    cffi_requests = None
+
 WIKI_URL = "https://en.wikipedia.org/wiki/Proxy_server"
 AMAZON_URLS = {
     "us": "https://www.amazon.com/s?k=laptop",
@@ -54,7 +59,7 @@ CAPTCHA_MARKERS = ("validateCaptcha", "Type the characters you see",
                    "Enter the characters you see", "api-services-support@amazon.com",
                    "To discuss automated access")
 FIELDS = ["run_id", "ts_utc", "server", "provider", "target", "country_req", "url",
-          "ok", "status", "sec", "bytes", "result"]
+          "ok", "status", "sec", "bytes", "result", "engine"]
 TARGET_ORDER = ["wikipedia", "amazon"]
 TARGET_LABEL = {"wikipedia": "Wikipedia (control)", "amazon": "Amazon search"}
 
@@ -64,6 +69,8 @@ def judge(target, status, text):
     """Turn a response into one result label. 'success' = usable page."""
     if target == "amazon" and any(m in text for m in CAPTCHA_MARKERS):
         return "captcha"
+    if target == "amazon" and "triggerInterstitialChallenge" in text:
+        return "challenge"
     if status == 200:
         if target == "wikipedia":
             return "success" if ("mw-parser-output" in text and "Wikipedia" in text) else "bad_content"
@@ -84,7 +91,18 @@ def unzip(raw, encoding):
     return raw.decode(errors="replace")
 
 
-def fetch(opener, url, timeout):
+def proxy_of(opener):
+    for h in opener.handlers:
+        if hasattr(h, "proxies"):
+            return h.proxies["https"]
+
+
+def fetch(opener, url, timeout, engine="urllib"):
+    if engine == "chrome":
+        proxy = proxy_of(opener)
+        r = cffi_requests.get(url, impersonate="chrome", proxies={"http": proxy, "https": proxy},
+                              timeout=timeout, headers={"Accept-Language": "en-US,en;q=0.9"})
+        return r.status_code, len(r.content), r.text
     req = urllib.request.Request(url, headers=HEADERS)
     try:
         with opener.open(req, timeout=timeout) as r:
@@ -94,13 +112,13 @@ def fetch(opener, url, timeout):
     return status, len(raw), unzip(raw, enc)
 
 
-def one_target(opener, run_id, server, provider, target, cc, url, timeout):
+def one_target(opener, run_id, server, provider, target, cc, url, timeout, engine="urllib"):
     t = time.time()
     row = dict(run_id=run_id, ts_utc=bench.utcnow(), server=server, provider=provider,
                target=target, country_req=cc, url=url, ok=0, status=0, sec=0.0,
-               bytes=0, result="")
+               bytes=0, result="", engine=engine)
     try:
-        status, nbytes, text = fetch(opener, url, timeout)
+        status, nbytes, text = fetch(opener, url, timeout, engine)
         row.update(status=status, bytes=nbytes, result=judge(target, status, text))
         row["ok"] = int(row["result"] == "success")
     except Exception as e:  # noqa: BLE001 - every failure is a data point
@@ -114,9 +132,9 @@ def table(rows):
     by = defaultdict(list)
     for r in rows:
         by[(r["target"], r["country_req"])].append(r)
-    head = "%-20s| %-8s| %-9s| %-30s| %-10s| %-8s| %-8s| %-8s| %-6s| %s" % (
+    head = "%-20s| %-8s| %-9s| %-30s| %-10s| %-8s| %-8s| %-10s| %-8s| %-6s| %s" % (
         "Target", "Country", "Requests", "Target Success Rate (95% CI)", "Median, s",
-        "P90, s", "Captcha", "Blocked", "Other", "Avg KB/request")
+        "P90, s", "Captcha", "Challenge", "Blocked", "Other", "Avg KB/request")
     print(head)
     print("-" * len(head))
 
@@ -126,10 +144,12 @@ def table(rows):
         med = "%.2f" % statistics.median(good) if good else "-"
         p90 = "%.2f" % bench.pctl(good, 0.9) if good else "-"
         cap = sum(1 for r in rs if r["result"] == "captcha")
+        chal = sum(1 for r in rs if r["result"] == "challenge")
         blk = sum(1 for r in rs if r["result"].startswith("blocked_"))
         kb = sum(r["bytes"] for r in rs) / n / 1024.0
-        print("%-20s| %-8s| %-9d| %-30s| %-10s| %-8s| %-8d| %-8d| %-6d| %.1f" % (
-            tname, cname, n, bench.fmt_rate(k, n), med, p90, cap, blk, n - k - cap - blk, kb))
+        print("%-20s| %-8s| %-9d| %-30s| %-10s| %-8s| %-8d| %-10d| %-8d| %-6d| %.1f" % (
+            tname, cname, n, bench.fmt_rate(k, n), med, p90, cap, chal, blk,
+            n - k - cap - chal - blk, kb))
 
     for tg in [t for t in TARGET_ORDER if any(k[0] == t for k in by)]:
         ccs = [c for c in bench.COUNTRIES if (tg, c) in by] + \
@@ -153,6 +173,8 @@ def report(rows, title):
 
 # ---------------------------------------------------------------- commands
 def cmd_run(args):
+    if args.engine == "chrome" and cffi_requests is None:
+        sys.exit("curl_cffi is not installed. Install it or use --engine urllib")
     cfg = bench.load_config()
     keys = args.providers.split(",") if args.providers else sorted(cfg["providers"])
     for k in keys:
@@ -175,8 +197,8 @@ def cmd_run(args):
         return out
 
     total = sum(n for cc in countries for (_, _, n) in jobs(cc)) * len(keys)
-    print("[%s] target run %s on server '%s': %d providers, %d requests in total"
-          % (bench.utcnow(), run_id, args.server, len(keys), total))
+    print("[%s] target run %s on server '%s': %d providers, %d requests in total, engine=%s"
+          % (bench.utcnow(), run_id, args.server, len(keys), total, args.engine))
     rows = []
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
@@ -190,7 +212,7 @@ def cmd_run(args):
                     with ThreadPoolExecutor(max_workers=args.workers) as ex:
                         batch = list(ex.map(
                             lambda i: one_target(opener, run_id, args.server, key, target,
-                                                 cc, url, args.timeout), range(n)))
+                                                 cc, url, args.timeout, args.engine), range(n)))
                     w.writerows(batch)
                     f.flush()
                     rows += batch
@@ -279,6 +301,8 @@ def main():
     s.add_argument("--workers", type=int, default=5)
     s.add_argument("--timeout", type=float, default=40)
     s.add_argument("--run-id", default="")
+    s.add_argument("--engine", default="chrome" if cffi_requests else "urllib",
+                   help="chrome = browser-like TLS fingerprint (curl_cffi); urllib = plain Python")
     s.add_argument("--wiki-url", default="", help="override (for tests only)")
     s.add_argument("--amazon-url", default="", help="override (for tests only)")
     s.set_defaults(fn=cmd_run)

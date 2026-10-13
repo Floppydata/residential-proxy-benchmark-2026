@@ -66,9 +66,13 @@ We ran this on the published CSV files and all tables except the IP quality colu
 
 ## Run your own test
 
-The scripts use only the Python standard library (`analyze.py` also needs pandas and openpyxl).
+The scripts use the Python standard library, with two exceptions: `targets.py` needs `curl_cffi`
+for the Chrome TLS fingerprint used in the benchmark (`--engine chrome`, the default when `curl_cffi`
+is installed; `--engine urllib` is a plain-Python fallback that was not used for the published data),
+and `analyze.py` needs pandas and openpyxl.
 
 ```bash
+pip install curl_cffi            # for targets.py
 python3 scripts/bench.py setup    # enter provider credentials once (stored in providers.json, never commit it)
 python3 scripts/bench.py check    # one request per provider and country
 python3 scripts/bench.py run      # infrastructure test, writes data/*.csv
@@ -84,7 +88,8 @@ Credentials are entered through `setup` and are never part of the scripts. `prov
 - **infra:** `run_id, ts_utc, server, provider, test, target, country_req, ok, sec, ip, geo_cf, colo, bytes, err`
   (`ok` 1/0, `sec` request time, `geo_cf` country reported by Cloudflare, `colo` Cloudflare data centre).
 - **targets:** `run_id, ts_utc, server, provider, target, country_req, url, ok, status, sec, bytes, result, engine`
-  (`result` is success, captcha, challenge (JavaScript challenge), blocked_NNN or an error type).
+  (`result` is success, captcha, challenge (JavaScript challenge), blocked_NNN or an error type;
+  `engine` is the HTTP client: `chrome` = curl_cffi with a Chrome TLS fingerprint, used for every published row).
 - **sticky:** `run_id, ts_utc, server, provider, session, country, t_sec, ok, ip, err`.
 - **ttfb:** `run_id, ts_utc, server, provider, country_req, ok, http, ip, t_connect, t_tls, ttfb, t_total, err`.
 
