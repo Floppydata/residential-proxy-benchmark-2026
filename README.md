@@ -64,6 +64,20 @@ python3 scripts/analyze.py --raw work --out my_results.xlsx
 Performance by GEO and others). The workbook is written with formulas: open it in Excel or LibreOffice and recalculate.
 We ran this on the published CSV files and all tables except the IP quality columns match the published workbook.
 
+### Pairwise differences (compare pages)
+
+The floppydata.com compare pages (for example /compare/oxylabs-vs-floppydata/) call a winner only when the
+difference is clear at 95% confidence. Rates use the workbook's intervals; for latency (median, P90) and
+Duplicate Rate, `scripts/pairs.py` computes the 95% interval of the difference between two providers from the
+raw logs, resampling whole runs. A difference whose interval contains 0 is a tie.
+
+```bash
+python3 scripts/pairs.py --raw data/raw --out pairs.json          # Floppydata against each other provider
+python3 scripts/pairs.py --raw data/raw --all --out pairs.json    # every pair
+```
+
+Standard library only. With the default seed (2026) the output matches the intervals the pages use.
+
 ## Run your own test
 
 The scripts use the Python standard library, with two exceptions: `targets.py` needs `curl_cffi`
